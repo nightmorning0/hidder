@@ -26,7 +26,7 @@ class Sealer:
         self.fernet = Fernet(self.tk)
         self.block_size = block_size
     
-    def encr_content(self):
+    def encrypt(self):
         path_queue = queue.Queue()
         dir_queue = queue.LifoQueue()
 
@@ -46,7 +46,8 @@ class Sealer:
             elif p.is_file():
                 new_p = self.tgt/self.encr_path(p.relative_to(self.src))
                 Sealer.mk_partent_dir(new_p)
-                self.encr_file(p, new_p)
+                # self.encr_file(p, new_p)
+                self.encr_file_static(p, new_p, self.tk, self.block_size, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER)
                 
             else:
                 raise
@@ -55,7 +56,7 @@ class Sealer:
             p = dir_queue.get()
             self.encr_dir_name(p)
             
-    def decr_content(self):
+    def decrypt(self):
         path_queue = queue.Queue()
         dir_queue = queue.LifoQueue()
 
@@ -64,7 +65,6 @@ class Sealer:
 
         while not path_queue.empty():
             p = path_queue.get()
-            print(p)
             for child_p in p.glob("*"):
                 path_queue.put(child_p)
 
@@ -76,7 +76,8 @@ class Sealer:
             elif p.is_file():
                 new_p = self.tgt/self.decr_path(p.relative_to(self.src))
                 Sealer.mk_partent_dir(new_p)
-                self.decr_file(p, new_p)
+                # self.decr_file(p, new_p)
+                self.decr_file_static(p, new_p, self.tk, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER)
 
         while(not dir_queue.empty()):
             p = dir_queue.get()
@@ -175,7 +176,7 @@ class Sealer:
                 name = fp.read()
             os.remove(name_file_path)
             os.rename(dir_path, dir_path.parent/name)
-            
+
     @staticmethod
     def mk_partent_dir(p):
         Path(p).parent.mkdir(exist_ok=True, parents=True)
@@ -184,12 +185,66 @@ class Sealer:
     def ch_root(p, src, tgt):
         return Path(tgt)/Path(p).relative_to(src)
 
+    @staticmethod
+    def encr_file_static(src, tgt, tk, block_size, header_block_size, byte_order):
+        if src == tgt:
+            tgt = tgt.parent/(tgt.name + ".tmp")
+            remove_flag = True
+        else:
+            remove_flag = False
+        fernet = Fernet(tk)
+        reader = open(src, "rb")
+        writer = open(tgt, "wb")
 
+        data = reader.read(block_size)
+        new_data = fernet.encrypt(data)
+        encr_block_size = len(new_data)
+        writer.write(encr_block_size.to_bytes(header_block_size, byte_order))
+        writer.write(new_data)
+        
+        data = reader.read(block_size)
+        while len(data) != 0:
+            new_data = fernet.encrypt(data)
+            writer.write(new_data)
+            data = reader.read(block_size)
+        
+        reader.close()
+        writer.close()
 
-            
+        if remove_flag:
+            os.remove(src)
+            tgt.rename(src)
+    
+    @staticmethod
+    def decr_file_static(src, tgt, tk, header_block_size, byte_order):
+        fernet = Fernet(tk)
+        if src == tgt:
+            tgt = tgt.parent/(tgt.name + ".tmp")
 
-s = Sealer("test", "test_out", "token")
-s.encr_content()
+        reader = open(src, "rb")
+        writer = open(tgt, "wb")
+
+        encr_block_size = int.from_bytes(
+            reader.read(header_block_size),
+            byte_order,
+            signed=False
+        ) 
+        
+        data = reader.read(encr_block_size)
+        while len(data) != 0:
+            new_data = fernet.decrypt(data)
+            writer.write(new_data)
+            data = reader.read(encr_block_size)
+        
+        reader.close()
+        writer.close()
+
+        if src == tgt:
+            os.remove(src)
+            tgt.rename(src)
+
+s = Sealer("test", "test_out")
+s.encrypt()
 
 s = Sealer("test_out", "test_out2", "token")
-s.decr_content()
+s.decrypt()
