@@ -1,18 +1,23 @@
 import os
 import tqdm
 import queue
+import ctypes
 import multiprocessing
 import random
-
+import time
+import logging
 from pathlib import Path
 from cryptography.fernet import Fernet
 
+
 class Sealer:
     HEADER_BLOCK_SIZE = 10
+    HEADER_FILE_NAME = 256
     BYTE_ORDER = "big"
     ENCODEING = "utf-8"
     MAX_DIRS_AT_SAME_LEVEL = 9999
     NAMEFILE_NAME = ".name"
+    LOG_FLUSH_INTERVAL = 0.2
     def __init__(self, src, tgt, tk="", block_size=512) -> None:
         self.src = Path(src)
         self.tgt = Path(tgt)
@@ -25,8 +30,9 @@ class Sealer:
                 self.tk = fp.read()
         self.fernet = Fernet(self.tk)
         self.block_size = block_size
+        self.logger = logging.getLogger("Sealer")
     
-    def encrypt(self):
+    def encrypt_singleprocess(self):
         path_queue = queue.Queue()
         dir_queue = queue.LifoQueue()
 
@@ -46,9 +52,7 @@ class Sealer:
             elif p.is_file():
                 new_p = self.tgt/self.encr_path(p.relative_to(self.src))
                 Sealer.mk_partent_dir(new_p)
-                # self.encr_file(p, new_p)
-                self.encr_file_static(p, new_p, self.tk, self.block_size, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER)
-                
+                self.encr_file(p, new_p)                
             else:
                 raise
         
@@ -56,7 +60,7 @@ class Sealer:
             p = dir_queue.get()
             self.encr_dir_name(p)
             
-    def decrypt(self):
+    def decrypt_singleprocess(self):
         path_queue = queue.Queue()
         dir_queue = queue.LifoQueue()
 
@@ -76,13 +80,112 @@ class Sealer:
             elif p.is_file():
                 new_p = self.tgt/self.decr_path(p.relative_to(self.src))
                 Sealer.mk_partent_dir(new_p)
-                # self.decr_file(p, new_p)
-                self.decr_file_static(p, new_p, self.tk, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER)
+                self.decr_file(p, new_p)
+                # self.decr_file_static(p, new_p, self.tk, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER)
 
         while(not dir_queue.empty()):
             p = dir_queue.get()
             self.decr_dir_name(p)
-                
+
+    def prepare_queues(self, mode):
+        path_queue = queue.Queue()
+        dir_queue = queue.LifoQueue()
+        file_pair_queue = multiprocessing.Queue()
+        total_file_pair = 0
+
+        for child_p in self.src.glob("*"):
+            path_queue.put(child_p)
+
+        self.logger.info("reading file list")
+        while not path_queue.empty():
+            p = path_queue.get()
+            for child_p in p.glob("*"):
+                path_queue.put(child_p)
+            
+            if p.is_dir():
+                new_p = self.tgt/p.relative_to(self.src)
+                new_p.mkdir(exist_ok=True, parents=True)
+                dir_queue.put(new_p)
+
+            elif p.is_file():
+                if mode == "encrypt":
+                    new_p = self.tgt/self.encr_path(p.relative_to(self.src))
+                elif mode == "decrypt":
+                    new_p = self.tgt/self.decr_path(p.relative_to(self.src))
+                else:
+                    raise
+                Sealer.mk_partent_dir(new_p)
+                file_pair_queue.put([p, new_p])
+                total_file_pair += 1                
+            else:
+                raise
+        self.logger.info(f"{total_file_pair} files in total founded")
+        return dir_queue, file_pair_queue, total_file_pair
+
+    def encrypt_multiprocesses(self, n_workers=4):
+        dir_queue, file_pair_queue, total_file_pair = self.prepare_queues("encrypt")
+        
+        self.logger.info("encrypt files")
+        workers = []
+        counter = multiprocessing.Value(ctypes.c_longlong, lock=True)
+        for i in range(n_workers):
+            proc = multiprocessing.Process(
+                target = Sealer.encr_queue,
+                name = f"file-encryption-proc-{i}",
+                args = [file_pair_queue, self.tk, self.block_size, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER, counter]
+            )
+            proc.start()
+            workers.append(proc)
+            self.logger.info(f"encryption process {i} started.")
+
+        pbar = tqdm.tqdm(total=total_file_pair)
+        while counter.value < total_file_pair:
+            with counter.get_lock():
+                pbar.update(counter.value - pbar.n)
+            time.sleep(self.LOG_FLUSH_INTERVAL)
+        pbar.update(counter.value - pbar.n)
+        pbar.close()
+
+        for worker in workers:
+            worker.join()
+        
+        self.logger.info("encrypt directories")
+        while(not dir_queue.empty()):
+            p = dir_queue.get()
+            self.encr_dir_name(p)        
+
+    def decrypt_multiprocesses(self, n_workers=4):
+        dir_queue, file_pair_queue, total_file_pair = self.prepare_queues("decrypt")
+
+        self.logger.info("decrypt files")
+        workers = []
+        counter = multiprocessing.Value(ctypes.c_longlong, lock=True)
+        for i in range(n_workers):
+            proc = multiprocessing.Process(
+                target = Sealer.decr_queue,
+                name = f"file-decryption-proc-{i}",
+                args = [file_pair_queue, self.tk, self.HEADER_BLOCK_SIZE, self.BYTE_ORDER, counter]
+            )
+            proc.start()
+            workers.append(proc)
+            self.logger.info(f"decryption process {i} started.")
+
+        pbar = tqdm.tqdm(total=total_file_pair)
+        while counter.value < total_file_pair:
+            with counter.get_lock():
+                pbar.update(counter.value - pbar.n)
+            time.sleep(self.LOG_FLUSH_INTERVAL)
+        pbar.update(counter.value - pbar.n)
+        pbar.close()
+
+        for worker in workers:
+            worker.join()
+        
+        self.logger.info("decrypt directories")
+        while(not dir_queue.empty()):
+            p = dir_queue.get()
+            self.decr_dir_name(p)   
+
     def encr_str(self, s):
         return str(
             self.fernet.encrypt(bytes(s, encoding=self.ENCODEING)), 
@@ -243,8 +346,47 @@ class Sealer:
             os.remove(src)
             tgt.rename(src)
 
-s = Sealer("test", "test_out")
-s.encrypt()
+    @staticmethod
+    def encr_queue(queue, tk, block_size, header_block_size, byte_order, counter):
+        try:
+            pair = queue.get_nowait()
+        except:
+            pair = None
 
-s = Sealer("test_out", "test_out2", "token")
-s.decrypt()
+        while not pair is None:
+            src, tgt = pair
+            Sealer.encr_file_static(src, tgt, tk, block_size, header_block_size, byte_order)
+            with counter.get_lock():
+                counter.value += 1
+            try:
+                pair = queue.get_nowait()
+            except:
+                pair = None
+    
+    @staticmethod
+    def decr_queue(queue, tk, header_block_size, byte_order, counter):
+        try:
+            pair = queue.get_nowait()
+        except:
+            pair = None
+
+        while not pair is None:
+            src, tgt = pair
+            Sealer.decr_file_static(src, tgt, tk, header_block_size, byte_order)
+            with counter.get_lock():
+                counter.value += 1
+            try:
+                pair = queue.get_nowait()
+            except:
+                pair = None
+        
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    # s = Sealer("test", "test_out")
+    # s.encrypt()
+    # s.encrypt_multiprocesses(8)
+
+    s = Sealer("test_out", "test_out2", "token")
+    s.decrypt_multiprocesses(8)
