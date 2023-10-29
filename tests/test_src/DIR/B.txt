@@ -1,0 +1,2 @@
+What is the meaning of the word decrypt?
+to change electronic information or signals that were stored, written, or sent in the form of a secret code (= a system of letters, numbers, or symbols) back into a form that you can understand and use normally: Messages encrypted using the public key can be decrypted only by someone with the private key.

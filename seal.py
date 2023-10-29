@@ -399,8 +399,9 @@ class Sealer:
                 pair = None
         
 
-
 if __name__ == "__main__":
+
+
     logging.basicConfig(level=logging.INFO)
     # s = Sealer("test", "test_out")
     # s.encrypt()
