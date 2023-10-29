@@ -18,7 +18,15 @@ class Sealer:
     MAX_DIRS_AT_SAME_LEVEL = 9999
     NAMEFILE_NAME = ".name"
     LOG_FLUSH_INTERVAL = 0.2
-    def __init__(self, src, tgt, tk="", block_size=512) -> None:
+    def __init__(self, src:str, tgt:str, tk:str="", block_size:int=512) -> None:
+        """_summary_
+
+        Args:
+            src (str): the source directory you want to seal/unseal.
+            tgt (str): the target directory you want to seal/unseal.
+            tk (str, optional): the key to be used in the process. Defaults to "".
+            block_size (int, optional): the size(MB) of cache to read file. Defaults to 512.
+        """
         self.src = Path(src)
         self.tgt = Path(tgt)
         if tk == "":
@@ -123,6 +131,11 @@ class Sealer:
         return dir_queue, file_pair_queue, total_file_pair
 
     def encrypt_multiprocesses(self, n_workers=4):
+        """Use Fernet to encrypt queue.
+
+        Args:
+            n_workers (int, optional): the num of process to encrypt. Defaults to 4.
+        """
         dir_queue, file_pair_queue, total_file_pair = self.prepare_queues("encrypt")
         
         self.logger.info("encrypt files")
@@ -155,6 +168,11 @@ class Sealer:
             self.encr_dir_name(p)        
 
     def decrypt_multiprocesses(self, n_workers=4):
+        """Use Fernet to decrypt queue.
+
+        Args:
+            n_workers (int, optional): the num of process to decrypt. Defaults to 4.
+        """
         dir_queue, file_pair_queue, total_file_pair = self.prepare_queues("decrypt")
 
         self.logger.info("decrypt files")
